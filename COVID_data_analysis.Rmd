@@ -1,0 +1,169 @@
+---
+title: "COVID-19 US Data Analysis"
+output:
+  html_document: default
+  pdf_document: default
+date: "`r Sys.Date()`"
+---
+
+## Introduction
+This report summarizes and analyzes COVID-19 case/death data in the US using the Johns Hopkins repository [available here](https://github.com/CSSEGISandData/COVID-19). The main goal of the study will be to characterize the impact of COVID-19 across the various sates and to model the progression of the disease across each state. The main question I would like to answer is if the same model predicting deaths from cases can be applied to all states. To do this, I will use the most impacted state to develop a linear model to calculate number of deaths from number of cases. I will then apply this model to all other states and see how well it works.
+
+## Description of data
+The data used is both case and death data from the US as time-series data. There are several geographical identifier columns in each csv that describe county, state/province, and longitude/latitude. The data columns are labeled by date and contain an aggregate number of cases and deaths respectively for each dataset. The data schema is identical between the two csv input files. The data can be accessed at the links used in the "Import data" code cell.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Load necessary libraries
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+```
+
+#### Import data.
+The data needs to be cleaned up and organized for my intended analysis. For this, I filter out all columns for specific geographic details and aggregate by state/province. This way I can focus my analysis on state-level metrics.
+```{r import-data, echo=TRUE}
+# Loading
+deaths <- read.csv("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_US.csv")
+confirmed <- read.csv("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_US.csv")
+
+# I am only interested in US State data for this analysis, so I'll omit territories etc
+deaths <- deaths %>%
+  filter(Province_State != "Diamond Princess", Province_State != "Grand Princess", Province_State != "American Samoa", Province_State != "District of Columbia", Province_State != "Guam", Province_State != "Northern Mariana Islands", Province_State != "Puerto Rico", Province_State != "Virgin Islands")
+
+confirmed <- confirmed %>%
+  filter(Province_State != "Diamond Princess", Province_State != "Grand Princess", Province_State != "American Samoa", Province_State != "District of Columbia", Province_State != "Guam", Province_State != "Northern Mariana Islands", Province_State != "Puerto Rico", Province_State != "Virgin Islands")
+
+# Don't care about columns for geographic codes/coordinates
+numeric_columns_deaths <- deaths[, !(names(deaths) %in% c('UID', 'iso2', 'iso3', 'code3', 'FIPS', 'Admin2', 'Country_Region', 'Lat', 'Long_', 'Combined_Key', 'Population'))]
+numeric_columns_confirmed <- confirmed[, !(names(confirmed) %in% c('UID', 'iso2', 'iso3', 'code3', 'FIPS', 'Admin2', 'Country_Region', 'Lat', 'Long_', 'Combined_Key'))]
+
+# Want to aggregate by state as I am not interested in stratifying by county
+aggregate_deaths_numeric <- aggregate(. ~ Province_State, data = numeric_columns_deaths, FUN = sum, na.rm = TRUE)
+aggregate_confirmed_numeric <- aggregate(. ~ Province_State, data = numeric_columns_confirmed, FUN = sum, na.rm = TRUE)
+```
+
+#### Visualizations
+##### Visualizing total impact of COVID-19 for each state for both deaths and cases.
+This will help us understand the overall impact of COVID-19 on each US state/territory
+```{r visualize-data, echo=TRUE}
+# selecting the last column for deaths and confirmed cases
+# The last column has the most recent date
+last_column_deaths <- tail(names(aggregate_deaths_numeric), 1)
+last_column_confirmed <- tail(names(aggregate_confirmed_numeric), 1)
+
+# total deaths by state 
+ggplot(aggregate_deaths_numeric, aes_string(x = "reorder(Province_State, -get(last_column_deaths))", y = last_column_deaths)) +
+  geom_bar(stat = "identity", fill = "red") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Total COVID-19 Deaths by State (Most Recent Data)", x = "State", y = "Total Deaths")
+
+# total confirmed cases by state
+ggplot(aggregate_confirmed_numeric, aes_string(x = "reorder(Province_State, -get(last_column_confirmed))", y = last_column_confirmed)) +
+  geom_bar(stat = "identity", fill = "blue") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Total COVID-19 Confirmed Cases by State (Most Recent Data)", x = "State", y = "Total Confirmed Cases")
+```
+
+##### Visualizing impact to most affected state (California).
+Here I want to examine the data to see if I can visually identify any sort of trend I can use to inform the model I choose to develop to explain the data.
+```{r visualize-ca-data, echo=TRUE}
+# Need to fix datetime formatting in the columns because it is super unusual
+prepared_data <- function(data, value_name) {
+  data %>%
+    filter(Province_State == "California") %>%
+    select(-Province_State) %>%
+    pivot_longer(cols = everything(), names_to = "Date", values_to = value_name) %>%
+    mutate(Date = sub("X", "", Date),  # Remove 'X' prefix
+           Date = as.Date(Date, format = "%m.%d.%y"))  # Convert string to Date
+}
+
+# Prepare deaths and confirmed cases data
+deaths_ca <- prepared_data(aggregate_deaths_numeric, "Deaths")
+confirmed_ca <- prepared_data(aggregate_confirmed_numeric, "Cases")
+
+# Plotting deaths
+ggplot(deaths_ca, aes(x = Date, y = Deaths)) +
+  geom_line(color = "red") +
+  labs(title = "COVID-19 Deaths in California", x = "Date", y = "Deaths") +
+  theme_minimal()
+
+# Plotting confirmed cases
+ggplot(confirmed_ca, aes(x = Date, y = Cases)) +
+  geom_line(color = "blue") +
+  labs(title = "COVID-19 Confirmed Cases in California", x = "Date", y = "Cases") +
+  theme_minimal()
+```
+
+#### Modeling
+Both deaths and cases seem to increase at similar rates, so let's see if we can model deaths as a function of cases.
+As they seem to increase co linearly, I will use a linear regression model.
+```{r model-ca-data, echo=TRUE}
+ca_data <- merge(deaths_ca, confirmed_ca, by = "Date")
+
+# Fitting deaths as a function of Cases
+model <- lm(Deaths ~ Cases, data = ca_data)
+
+# Summarize the model
+summary(model)
+
+# Plotting the relationship along with the regression line
+ggplot(ca_data, aes(x = Cases, y = Deaths)) +
+  geom_point() +
+  geom_smooth(method = "lm", col = "red") +
+  labs(title = "COVID-19 Deaths vs. Confirmed Cases in California",
+       x = "Confirmed Cases", y = "Deaths") +
+  theme_minimal()
+
+```
+
+These results show a quite strong R^2 value of 0.8973 which means that 89.73% of the variance in death counts can be explained by using number of confirmed cases as a predictor. Given the generally high prediction, this seems to be a good model and we can carry on applying it to the other states.
+To put our linear model into plain text, we can model our deaths resulting from cases using the equation
+(number of deaths)=0.007922*(number of cases)+14560
+
+To evaluate efficacy of the model, I will use Root Mean Squared Error (RMSE). This basically provides a measure of the difference between the value predicted by the linear model and actual values.
+```{r apply-model-to-other-states, echo=TRUE}
+# Join data to easily access case and death data for each state.
+# The output of this join has row names as the state name, all death time series columns, then all case time series columns.
+state_data <- inner_join(aggregate_deaths_numeric, aggregate_confirmed_numeric, by = "Province_State", suffix = c("_deaths", "_cases"))
+
+# Calculate the index of the last death column to find the most recent death total
+# because deaths and cases have the same number of columns, we can just find the middle column
+last_death_column_index <- ncol(state_data) / 2
+
+# Calculate the index of the last case column
+# This is just the last column
+last_case_column_index <- ncol(state_data)
+
+state_data <- state_data %>%
+  mutate(
+    most_recent_deaths = .[[last_death_column_index]],  # most recent death count
+    most_recent_cases = .[[last_case_column_index]],  # most recent case count
+    predicted_deaths = 0.007922 * most_recent_cases + 14560  # Applies the linear model
+  ) %>%
+  select(Province_State, most_recent_deaths, predicted_deaths)  # Keeps only relevant columns
+
+# Calculate RMSE for each state
+calc_rmse <- function(actual, predicted) {
+  sqrt(mean((predicted - actual)^2))
+}
+
+state_data <- state_data %>%
+  rowwise() %>%
+  mutate(rmse = calc_rmse(most_recent_deaths, predicted_deaths)) %>%
+  ungroup()
+
+# View the RMSE values for each state
+print(state_data, n = Inf)
+```
+
+## Conclusions
+It looks like our model produces RMSE values in the thousands range for all states. I interpret this as a fairly unsuccessful model because most states only had tens of thousands of deaths. This means that I have error in the tens of percent range which is really bad. Unfortunately, this study was largely biased by population sizes. This was caused by the failure to normalize the data by population. Normalizing RMSE to population may give a more true estimate of error. This could be achieved by simply dividing RMSE by the population of each state. For example, dividing California's RMSE of ~10e5 by its population of ~40e7 gives 2.5e-4. If we normalize Texas's RMSE of ~10e5 by its population of ~30e7 we get 3.3e-4. This is on par with California's error even though the raw RMSE is about 3,000 higher. Dividing Colorado's RMSE of ~1.5e4 by its population of ~6e6 gives 2.5e-3. While the unadjusted RMSE for Colorado is about 50% larger than California's, normalizing it reveals about a full order of magnitude greater error. This normalization is not difficult to perform, but I was unable to find an easy data import for US State populations without doing web scraping of a Wikipedia or Britannica webpage. One table I found is [here](https://www.britannica.com/topic/largest-U-S-state-by-population).
+
+In conclusion, the model to predict deaths based on number of cases generated using California's data fails to successfully predict deaths for other US states. A large source of bias in the evaluation of this model is the absence of normalization. It is uncertain if this would reveal if the model works better or not, but the evaluation would be more fair.
+
+
+
+```{r echo=FALSE}
+sessionInfo()
+```
